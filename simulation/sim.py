@@ -390,8 +390,8 @@ class TrackedParticleSimulator:
                                     total_mass, merged_lineage)
         continuing_particle['last_event_frame'] = self.current_frame
         
-        # Record normal state after merge
-        self.record_particle_state(continuing_particle, EventLabel.NORMAL)
+        # Record post merge state after merge
+        self.record_particle_state(continuing_particle, EventLabel.POST_MERGE)
         
         # Update recent event tracking
         self.recent_event_particles[continuing_particle['id']] = self.current_frame
@@ -557,8 +557,8 @@ class TrackedParticleSimulator:
                                     continuing_mass, parent_lineage)
         particle['last_event_frame'] = self.current_frame
         
-        # Record normal state after split
-        self.record_particle_state(particle, EventLabel.NORMAL)
+        # Record post split state after split
+        self.record_particle_state(particle, EventLabel.POST_SPLIT)
 
     def _process_normal_split(self, particle, mass1, mass2, dx, dy, dz):
         """Process a normal split where particle disappears and two new ones are created"""
@@ -723,31 +723,7 @@ class TrackedParticleSimulator:
         # POST-PHASE: Handle post-event labeling and spontaneous events
         self.process_post_phase()
 
-    def update(self, dt=0.1):
-        self.current_frame += 1
-        self.current_frame_events = {'merges': [], 'splits': []}
-        
-        self.recent_event_particles = {
-            pid: frame for pid, frame in self.recent_event_particles.items()
-            if self.current_frame - frame <= self.event_cooldown
-        }
-        
-        active_particles = [p for p in self.particles if p['active']]
-        
-        merged_particles = set()
-        split_particles = set()
-    
-        # PHASE 1: MERGE PROCESSING
-        merged_particles = self.process_merge_phase(active_particles)        
-        
-        # PHASE 2: SPLIT PROCESSING
-        split_particles = self.process_split_phase(active_particles,merged_particles)
 
-        # PHASE 3: NORMAL UPDATE
-        self.process_normal_update_phase(active_particles, merged_particles, split_particles, dt)
-        
-        # POST-PHASE: Handle post-event labeling and spontaneous events
-        self.process_post_phase()
     
     def export_to_csv(self, filename):
         data = []
@@ -830,7 +806,7 @@ class TrackedParticleSimulator:
 def run_single_simulation(sim_id):
     np.random.seed(sim_id)
     
-    output_dir = '../../data/3class/tracked_simdata_partiallinking'
+    output_dir = 'data/tracked_simdata_partiallinking'
     os.makedirs(output_dir, exist_ok=True)
     
     num_frames = 200

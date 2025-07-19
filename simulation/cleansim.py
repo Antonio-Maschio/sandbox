@@ -8,13 +8,13 @@ from typing import List, Tuple, Dict, Optional, Set
 from multiprocessing import Pool, cpu_count
 import time
 import warnings
-"""clean simulation without any noise yet."""
 class EventLabel(IntEnum):
     NORMAL = 0
     MERGE = 1
     SPLIT = 2
     POST_MERGE = 3
     POST_SPLIT = 4
+
 
 class TrackedParticleSimulator:
     def __init__(self, 
@@ -94,10 +94,7 @@ class TrackedParticleSimulator:
         
         D = self.kB * self.T / (6 * np.pi * self.eta * radius * 1e-9)
         
-        if inherit_cooldown and parent_ids:
-            last_event_frame = self.current_frame
-        else:
-            last_event_frame = -float('inf')
+        last_event_frame = -float('inf')
         
         particle = {
             'id': self.next_id,
@@ -138,15 +135,16 @@ class TrackedParticleSimulator:
         particle['D'] = D * 1e18 / (self.pixel_size**2)
         particle['parent_ids'] = parent_ids.copy()
         particle['last_updated_frame'] = self.current_frame
-    
+
+
     def can_have_event(self, particle):
         """Check if a particle can have an event based on cooldown"""
         if self.current_frame - particle.get('last_event_frame', -float('inf')) <= self.event_cooldown:
             return False
         
-        if particle['id'] in self.recent_event_particles:
-            if self.current_frame - self.recent_event_particles[particle['id']] <= self.event_cooldown:
-                return False
+        # if particle['id'] in self.recent_event_particles: #do not understand this 
+        #     if self.current_frame - self.recent_event_particles[particle['id']] <= self.event_cooldown:
+        #         return False
         
         if particle['parent_ids'] and self.current_frame - particle['birth_frame'] <= self.event_cooldown:
             return False
@@ -155,7 +153,7 @@ class TrackedParticleSimulator:
     
     def update_particle_position(self, particle, dt=0.1):
         """Update particle position with Brownian motion"""
-        if not particle['active']:
+        if not particle['active']: # is this needed?
             return False
             
         dx = np.random.normal(0, np.sqrt(2 * particle['D'] * dt))
@@ -206,43 +204,38 @@ class TrackedParticleSimulator:
         tree = KDTree(positions)
         
         merge_pairs = []
+        
         for i, p1 in enumerate(particles):
             if not self.can_have_event(p1):
                 continue
-                
-            if p1['last_updated_frame'] != self.current_frame:
-                continue
-                
+
+
             search_radius = self.merge_distance_factor * (p1['radius'] / self.pixel_size)
             neighbors = tree.query_ball_point(positions[i], search_radius)
             
             for j in neighbors:
                 if j <= i:
                     continue
-                    
                 p2 = particles[j]
-                
                 if not self.can_have_event(p2):
                     continue
-                
-                if p2['last_updated_frame'] != self.current_frame:
-                    continue
-                    
+
                 if p1['mass'] + p2['mass'] > self.max_mass:
+                    # skipped_due_to_mass += 1
                     continue
-                    
+
                 dist = np.linalg.norm(positions[i] - positions[j])
                 merge_threshold = self.merge_distance_factor * (p1['radius'] + p2['radius']) / (2 * self.pixel_size)
-                
                 if dist < merge_threshold:
                     if (p1['parent_ids'] and self.current_frame - p1['birth_frame'] <= self.event_cooldown) or \
-                       (p2['parent_ids'] and self.current_frame - p2['birth_frame'] <= self.event_cooldown):
+                    (p2['parent_ids'] and self.current_frame - p2['birth_frame'] <= self.event_cooldown):
+                        skipped_due_to_cooldown += 1
                         continue
-                    
-                    merge_pairs.append((p1, p2))
-                    
-        return merge_pairs
 
+                    merge_pairs.append((p1, p2))
+
+        return merge_pairs
+    
     def process_merge_phase(self, active_particles):
         """Phase 1: Process merge events"""
         merged_particles = set()
@@ -250,7 +243,7 @@ class TrackedParticleSimulator:
         merge_candidates = self.find_merge_candidates(active_particles)
         
         for p1, p2 in merge_candidates:
-            if p1['id'] in merged_particles or p2['id'] in merged_particles:
+            if p1['id'] in merged_particles or p2['id'] in merged_particles: # if already merged, skip this cycle.
                 continue
             
             if np.random.random() < self.merge_prob:
@@ -268,12 +261,15 @@ class TrackedParticleSimulator:
                 
                 merged_particles.add(p1['id'])
                 merged_particles.add(p2['id'])
+
+                print(f"Frame {self.current_frame}: Merged particles {p1['id']} and {p2['id']}") 
+
         
         return merged_particles
 
     def _process_linking_merge(self, p1, p2, new_x, new_y, new_z, total_mass):
         """Process a linking merge where one particle continues"""
-        if p1['mass'] >= p2['mass']:
+        if np.random.random()> 0.5:
             continuing_particle = p1
             disappearing_particle = p2
         else:
@@ -284,32 +280,40 @@ class TrackedParticleSimulator:
         self.record_particle_state(disappearing_particle, EventLabel.MERGE)
         self.record_particle_state(continuing_particle, EventLabel.MERGE)
         
-        # Deactivate disappearing particle
+        # Deactivate disappearing particle # update this to a function that removes particles.
         disappearing_particle['active'] = False
         disappearing_particle['death_frame'] = self.current_frame
         disappearing_particle['last_event_frame'] = self.current_frame
         
         # Create merged lineage
         merged_lineage = []
+
         merged_lineage.extend(continuing_particle['parent_ids'])
-        merged_lineage.append(continuing_particle['id'])
+        # merged_lineage.append(continuing_particle['id']) # this will stay alive so no reasone to be in lineage
+
         merged_lineage.extend(disappearing_particle['parent_ids'])
         merged_lineage.append(disappearing_particle['id'])
+        
         seen = set()
-        merged_lineage = [x for x in merged_lineage if not (x in seen or seen.add(x))]
+
+        merged_lineage = [x for x in merged_lineage if not (x in seen or seen.add(x))] #removes duplicates
+        
         
         # Update continuing particle
         self.update_existing_particle(continuing_particle, new_x, new_y, new_z, 
                                     total_mass, merged_lineage)
+        
         continuing_particle['last_event_frame'] = self.current_frame
+
         #####
         continuing_particle['event_info'] = ('merge', self.current_frame)
+
         # Record post-merge state
-        self.record_particle_state(continuing_particle, EventLabel.NORMAL)
+        self.record_particle_state(continuing_particle, EventLabel.POST_MERGE)
         
         # Update tracking
         self.recent_event_particles[continuing_particle['id']] = self.current_frame
-        self.recent_event_particles[disappearing_particle['id']] = self.current_frame
+        # self.recent_event_particles[disappearing_particle['id']] = self.current_frame
         
         self.current_frame_events['merges'].append({
             'parent_ids': [disappearing_particle['id'], continuing_particle['id']],
@@ -343,16 +347,16 @@ class TrackedParticleSimulator:
         merged_lineage = [x for x in merged_lineage if not (x in seen or seen.add(x))]
         
         # Create new particle from merge
-        new_id = self.add_particle(new_x, new_y, new_z, total_mass, 
-                                parent_ids=merged_lineage, inherit_cooldown=True)
+        new_id = self.add_particle(new_x, new_y, new_z, total_mass,birth_frame=self.current_frame+1, 
+                                parent_ids=merged_lineage, inherit_cooldown=True) # t+1?`
         
         # Record POST_MERGE state for new particle
         new_particle = next(p for p in self.particles if p['id'] == new_id)
         self.record_particle_state(new_particle, EventLabel.POST_MERGE)
         
         # Update recent event tracking
-        self.recent_event_particles[p1['id']] = self.current_frame
-        self.recent_event_particles[p2['id']] = self.current_frame
+        # self.recent_event_particles[p1['id']] = self.current_frame
+        # self.recent_event_particles[p2['id']] = self.current_frame
         self.recent_event_particles[new_id] = self.current_frame
         
         # Record merge event
@@ -393,6 +397,8 @@ class TrackedParticleSimulator:
                         self._process_normal_split(particle, mass1, mass2, dx, dy, dz)
                     
                     split_particles.add(particle['id'])
+
+                    print(f"Frame {self.current_frame}: Split particle {particle['id']}")
         
         return split_particles
 
@@ -558,36 +564,49 @@ class TrackedParticleSimulator:
             self.record_particle_state(new_particle, EventLabel.NORMAL)
         
         # Handle false positive (ghost particle) generation  
-        # if np.random.random() < self.false_positive_rate:
-        #     self.add_ghost_particle()
+ 
         
-        # Update ghost particles
+        # # Update ghost particles
         # self.ghost_particles = [g for g in self.ghost_particles 
         #                     if g['frames_lived'] < g['lifetime']]
         # for ghost in self.ghost_particles:
         #     self.update_ghost_particle(ghost)
 
     def update(self, dt=0.1):
-        """Main update function with 3 phases only"""
         self.current_frame += 1
         self.current_frame_events = {'merges': [], 'splits': []}
-        
+
         # Clean up old event particles from tracking
         self.recent_event_particles = {
             pid: frame for pid, frame in self.recent_event_particles.items()
             if self.current_frame - frame <= self.event_cooldown
         }
-        
+
+        # Refresh active particles list before each phase
         active_particles = [p for p in self.particles if p['active']]
         
         # PHASE 1: MERGE PROCESSING
         merged_particles = self.process_merge_phase(active_particles)
+
+        # Refresh again, excluding merged particles
+        active_particles = [p for p in self.particles if p['active'] and p['id'] not in merged_particles]
         
         # PHASE 2: SPLIT PROCESSING
         split_particles = self.process_split_phase(active_particles, merged_particles)
+
+        # Refresh again, excluding merged and split particles
+        active_particles = [p for p in self.particles if p['active']
+                            and p['id'] not in merged_particles
+                            and p['id'] not in split_particles]
         
-        # PHASE 3: NORMAL UPDATE (including spontaneous events)
+        # PHASE 3: NORMAL UPDATE
         self.process_normal_update_phase(active_particles, merged_particles, split_particles, dt)
+
+        all_events = merged_particles.union(split_particles)
+        duplicates = [p['id'] for p in self.particles if not p['active'] and p['id'] in all_events]
+        if duplicates:
+            print(f"Warning: Particles processed in multiple phases: {duplicates}")
+
 
     def export_to_csv(self, filename):
         """Export simulation data to CSV"""
@@ -649,7 +668,7 @@ def run_single_simulation(sim_id):
         max_mass=500000,
         merge_distance_factor=10.0,
         split_mass_threshold=100000,
-        merge_prob=0.7,
+        merge_prob=0.8,
         split_prob=0.01,
         merge_linking_prob=0.8,
         split_linking_prob=0.8,

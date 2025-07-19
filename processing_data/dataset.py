@@ -8,9 +8,10 @@ from tqdm import tqdm
 import torch
 from torch.utils.data import Dataset
 
-from processing_data.graph_builder import build_particle_graph, build_unlabeled_graph
-# from graph_builder import build_particle_graph, build_unlabeled_graph
-
+try:
+    from processing_data.graph_builder import build_particle_graph, build_unlabeled_graph
+except ImportError:
+    from graph_builder import build_particle_graph, build_unlabeled_graph
 
 class ParticleDataset(Dataset):
     def __init__(self, pattern, radius_buffer=0.0, max_workers=4, labeled=True):

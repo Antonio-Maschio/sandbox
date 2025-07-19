@@ -5,8 +5,11 @@ import torch
 from torch.utils.data import DataLoader, Subset
 from torch_geometric.data import Batch
 
-from processing_data.dataset import ParticleDataset
-# from dataset import ParticleDataset
+try:
+    from processing_data.dataset import ParticleDataset
+except ImportError:
+    from dataset import ParticleDataset
+
 
 
 class DataPreprocessor:

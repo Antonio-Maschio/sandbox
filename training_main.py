@@ -12,6 +12,7 @@ from processing_data.preprocessor import load_preprocessed_data
 
 
 from models.gnn import ParticleGNNBiggerWithResidual
+from models.gnn_A5000 import *
 from models.model_util import save_model
 from training.trainer import train_model
 from training.utils import plot_training_history
@@ -22,12 +23,12 @@ from training.roc_utils import compute_roc_curves, plot_roc_curves
 class TrainingConfig:
     """Configuration for model training."""
     # Data
-    processed_dir: str = "data/processed/"
+    processed_dir: str = "data/dirty_processed90detec/"
     batch_size: int = 8
-    num_workers: int = 7
+    num_workers: int = 2
     
     # Model
-    hidden_channels: int = 64
+    hidden_channels: int = 32
     num_classes: int = 5
     dropout: float = 0.0
     
@@ -38,7 +39,7 @@ class TrainingConfig:
     patience: int = 10
     
     # Paths
-    model_save_path: str = "saved_models/model_5class_v3simvfinal.pt"
+    model_save_path: str = "saved_models/dirty_processed"
     
     # Visualization
     plot_roc_curves: bool = True
@@ -63,11 +64,14 @@ def get_data_loaders(config: TrainingConfig):
 def initialize_model(num_features: int, config: TrainingConfig) -> torch.nn.Module:
     """Initialize the GNN model."""
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
     model = ParticleGNNBiggerWithResidual(
         num_node_features=num_features,
         hidden_channels=config.hidden_channels,
         num_classes=config.num_classes
     ).to(device)
+
+
     return model
 
 
@@ -171,9 +175,10 @@ if __name__ == "__main__":
     # Example with custom configuration
     custom_config = TrainingConfig(
         batch_size=8,
-        epochs=10,#500
+        epochs=500,#500
         learning_rate=0.005,
-        model_save_path="saved_models/experiment_v4.pt"
+        model_save_path="saved_models/detectio90_w40.pt"
     )
     
     model, history = main(custom_config)
+    

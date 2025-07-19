@@ -8,7 +8,8 @@ from typing import List, Tuple, Dict, Optional, Set
 from multiprocessing import Pool, cpu_count
 import time
 import warnings
-
+import random
+import math
 class EventLabel(IntEnum):
     NORMAL = 0
     MERGE = 1
@@ -199,322 +200,169 @@ class TrackedParticleSimulator:
         particle['last_updated_frame'] = self.current_frame
         return False
     
-    def find_merge_candidates(self, particles):
-        """Find potential merge candidates using spatial proximity"""
-        if len(particles) < 2:
-            return []
-            
-        positions = np.array([[p['x'], p['y'], p['z']] for p in particles])
-        tree = KDTree(positions)
+
+
+
+    def _distance(self,p1, p2):
+        """
+        Calculate the Euclidean distance between two 3D points.
         
-        merge_pairs = []
+        Args:
+            p1: First point as a tuple/list of coordinates (x1, y1, z1)
+            p2: Second point as a tuple/list of coordinates (x2, y2, z2)
         
-        for i, p1 in enumerate(particles):
-            if not self.can_have_event(p1):
-                continue
+        Returns:
+            The Euclidean distance between p1 and p2
+        """
+        dx = p1[0] - p2[0]
+        dy = p1[1] - p2[1]
+        dz = p1[2] - p2[2]
+        return math.sqrt(dx*dx + dy*dy + dz*dz)
 
-            search_radius = self.merge_distance_factor * (p1['radius'] / self.pixel_size)
-            neighbors = tree.query_ball_point(positions[i], search_radius)
-            
-            for j in neighbors:
-                if j <= i:
-                    continue
-                p2 = particles[j]
-                if not self.can_have_event(p2):
-                    continue
-
-                if p1['mass'] + p2['mass'] > self.max_mass:
-                    continue
-
-                dist = np.linalg.norm(positions[i] - positions[j])
-                merge_threshold = self.merge_distance_factor * (p1['radius'] + p2['radius']) / (2 * self.pixel_size)
-                if dist < merge_threshold:
-                    merge_pairs.append((p1, p2))
-
-        return merge_pairs
-    
     def process_merge_phase(self, active_particles):
-        """Phase 1: Process merge events - returns dict with deactivated and continuing particles"""
-        merged_info = {
-            'deactivated': set(),  # Particles that were deactivated
-            'continuing': set(),   # Particles that continue after linking merge
-            'all_involved': set()  # All particles involved in any merge
-        }
-        
-        merge_candidates = self.find_merge_candidates(active_particles)
-        
-        for p1, p2 in merge_candidates:
-            if p1['id'] in merged_info['all_involved'] or p2['id'] in merged_info['all_involved']:
-                continue
-            
-            if np.random.random() < self.merge_prob:
-                total_mass = p1['mass'] + p2['mass']
-                new_x = (p1['x'] * p1['mass'] + p2['x'] * p2['mass']) / total_mass
-                new_y = (p1['y'] * p1['mass'] + p2['y'] * p2['mass']) / total_mass
-                new_z = (p1['z'] * p1['mass'] + p2['z'] * p2['mass']) / total_mass
-                
-                if np.random.random() < self.merge_linking_prob:
-                    # LINKING MERGE
-                    continuing_id = self._process_linking_merge(p1, p2, new_x, new_y, new_z, total_mass)
-                    merged_info['continuing'].add(continuing_id)
-                    merged_info['deactivated'].add(p1['id'] if continuing_id == p2['id'] else p2['id'])
-                else:
-                    # NORMAL MERGE
-                    self._process_normal_merge(p1, p2, new_x, new_y, new_z, total_mass)
-                    merged_info['deactivated'].add(p1['id'])
-                    merged_info['deactivated'].add(p2['id'])
-                
-                merged_info['all_involved'].add(p1['id'])
-                merged_info['all_involved'].add(p2['id'])
+        """
+        Phase 1: Merge processing.
+        Identifies and processes merges between particles.
+        90% of the time, the merged particle inherits one parent's ID (50/50 chance which one).
+        """
+        merged_info = []
+        merge_distance_threshold = 10.0
+        merged_ids = set()
 
-                print(f"Frame {self.current_frame}: Merged particles {p1['id']} and {p2['id']}") 
-        
+        for i, p1 in enumerate(active_particles):
+            if p1['id'] in merged_ids or p1['id'] in self.recent_event_particles:
+                continue
+
+            for j in range(i + 1, len(active_particles)):
+                p2 = active_particles[j]
+                if p2['id'] in merged_ids or p2['id'] in self.recent_event_particles:
+                    continue
+
+                # Check distance
+                dist = self._distance(p1['position'], p2['position'])
+                if dist > merge_distance_threshold:
+                    continue
+
+                # Compute merged attributes
+                new_position = self._weighted_average(p1, p2)
+                new_velocity = self._weighted_average(p1, p2, key='velocity')
+                new_mass = p1['mass'] + p2['mass']
+
+                # Determine ID inheritance logic (90% of time inherit a parent ID, 50/50 chance)
+                inherit_id = random.random() < 0.9
+                if inherit_id:
+                    merged_id = random.choice([p1['id'], p2['id']])
+                else:
+                    merged_id = self.next_id
+                    self.next_id += 1
+
+                merged_particle = {
+                    'id': merged_id,
+                    'position': new_position,
+                    'mass': new_mass,
+                    'velocity': new_velocity,
+                    'active': True,
+                    'parents': [p1['id'], p2['id']],
+                    'frame_created': self.current_frame,
+                    'true_id': min(p1.get('true_id', p1['id']), p2.get('true_id', p2['id'])),
+                    'merge_depth': max(p1.get('merge_depth', 0), p2.get('merge_depth', 0)) + 1,
+                }
+
+                self.particles.append(merged_particle)
+
+                self.current_frame_events['merges'].append((p1['id'], p2['id'], merged_particle['id']))
+                p1['active'] = False
+                p2['active'] = False
+                merged_ids.update([p1['id'], p2['id']])
+
+                self.recent_event_particles[p1['id']] = self.current_frame
+                self.recent_event_particles[p2['id']] = self.current_frame
+
+                merged_info.append(merged_particle)
+                break  # Only merge once per particle
+
         return merged_info
 
-    def _process_linking_merge(self, p1, p2, new_x, new_y, new_z, total_mass):
-        """Process a linking merge where one particle continues - returns continuing particle ID"""
-        if np.random.random() > 0.5:
-            continuing_particle = p1
-            disappearing_particle = p2
-        else:
-            continuing_particle = p2
-            disappearing_particle = p1
-        
-        # Record pre-merge state for both particles
-        self.record_particle_state(disappearing_particle, EventLabel.MERGE)
-        self.record_particle_state(continuing_particle, EventLabel.MERGE)
-        
-        # Deactivate disappearing particle
-        disappearing_particle['active'] = False
-        disappearing_particle['death_frame'] = self.current_frame
-        disappearing_particle['last_event_frame'] = self.current_frame
-        
-        # Create merged lineage
-        merged_lineage = []
-        merged_lineage.extend(continuing_particle['parent_ids'])
-        merged_lineage.extend(disappearing_particle['parent_ids'])
-        merged_lineage.append(disappearing_particle['id'])
-        
-        seen = set()
-        merged_lineage = [x for x in merged_lineage if not (x in seen or seen.add(x))]
-        
-        # Update continuing particle
-        self.update_existing_particle(continuing_particle, new_x, new_y, new_z, 
-                                    total_mass, merged_lineage)
-        
-        continuing_particle['last_event_frame'] = self.current_frame
 
-        # Record post-merge state
-        self.record_particle_state(continuing_particle, EventLabel.POST_MERGE)
-        
-        # Update tracking
-        self.recent_event_particles[continuing_particle['id']] = self.current_frame
-        
-        self.current_frame_events['merges'].append({
-            'parent_ids': [disappearing_particle['id'], continuing_particle['id']],
-            'child_id': continuing_particle['id'],
-            'is_linking': True
-        })
-        
-        return continuing_particle['id']
-
-    def _process_normal_merge(self, p1, p2, new_x, new_y, new_z, total_mass):
-        """Process a normal merge where both particles disappear and new one is created"""
-        # Record states for both particles
-        self.record_particle_state(p1, EventLabel.MERGE)
-        self.record_particle_state(p2, EventLabel.MERGE)
-        
-        # Deactivate both particles
-        p1['active'] = False
-        p1['death_frame'] = self.current_frame
-        p1['last_event_frame'] = self.current_frame
-        
-        p2['active'] = False
-        p2['death_frame'] = self.current_frame
-        p2['last_event_frame'] = self.current_frame
-        
-        # Create merged lineage
-        merged_lineage = []
-        merged_lineage.extend(p1['parent_ids'])
-        merged_lineage.append(p1['id'])
-        merged_lineage.extend(p2['parent_ids'])
-        merged_lineage.append(p2['id'])
-        seen = set()
-        merged_lineage = [x for x in merged_lineage if not (x in seen or seen.add(x))]
-        
-        # Create new particle from merge
-        new_id = self.add_particle(new_x, new_y, new_z, total_mass, birth_frame=self.current_frame+1, 
-                                parent_ids=merged_lineage, inherit_cooldown=True)
-        
-        # Record POST_MERGE state for new particle
-        new_particle = next(p for p in self.particles if p['id'] == new_id)
-        self.record_particle_state(new_particle, EventLabel.POST_MERGE)
-        
-        # Update recent event tracking
-        self.recent_event_particles[new_id] = self.current_frame
-        
-        # Record merge event
-        self.current_frame_events['merges'].append({
-            'parent_ids': [p1['id'], p2['id']],
-            'child_id': new_id,
-            'is_linking': False
-        })
-        
-        return new_id
 
     def process_split_phase(self, active_particles, merged_info):
-        """Phase 2: Process split events - returns dict with deactivated and continuing particles"""
-        split_info = {
-            'deactivated': set(),  # Particles that were deactivated
-            'continuing': set(),   # Particles that continue after linking split
-            'all_involved': set()  # All particles involved in any split
-        }
-        
-        # Exclude all particles involved in merges (both deactivated and continuing)
-        phase2_particles = [p for p in active_particles if p['id'] not in merged_info['all_involved']]
-        
-        for particle in phase2_particles:
-            if (np.random.random() < self.split_prob and 
-                self.can_have_event(particle) and
-                particle['mass'] >= self.split_mass_threshold):
-                
-                kinetic_factor = particle['D'] / np.mean([p['D'] for p in active_particles])
-                if np.random.random() < kinetic_factor:
-                    ratio = np.random.uniform(0.4, 0.6)
-                    mass1 = particle['mass'] * ratio
-                    mass2 = particle['mass'] * (1 - ratio)
-                    
-                    phi = np.random.uniform(0, 2 * np.pi)
-                    theta = np.random.uniform(0, np.pi)
-                    sep_dist = np.random.uniform(1, 12)
-                    
-                    dx = sep_dist * np.sin(theta) * np.cos(phi)
-                    dy = sep_dist * np.sin(theta) * np.sin(phi)
-                    dz = sep_dist * np.cos(theta)
-                    
-                    if np.random.random() < self.split_linking_prob:
-                        self._process_linking_split(particle, mass1, mass2, dx, dy, dz)
-                        split_info['continuing'].add(particle['id'])
-                    else:
-                        self._process_normal_split(particle, mass1, mass2, dx, dy, dz)
-                        split_info['deactivated'].add(particle['id'])
-                    
-                    split_info['all_involved'].add(particle['id'])
+        """
+        Phase 2: Split processing.
+        Some recently merged particles may split into two, with one child usually inheriting the parent's ID.
+        """
+        split_info = []
+        split_probability = 0.3  # 30% chance to split
 
-                    print(f"Frame {self.current_frame}: Split particle {particle['id']}")
-        
+        for particle in merged_info:
+            if random.random() > split_probability:
+                continue  # Skip this one
+
+            # Split mass with uneven ratio
+            mass_total = particle['mass']
+            mass_ratio = random.uniform(0.3, 0.7)
+            mass1 = mass_total * mass_ratio
+            mass2 = mass_total - mass1
+
+            pos = particle['position']
+            vel = particle['velocity']
+            offset = random.uniform(-2, 2)
+
+            inherit_parent_id = random.random() < 0.9  # 90% chance to inherit parent ID
+
+            if inherit_parent_id:
+                # Randomly choose which child gets the parent's ID
+                if random.random() < 0.5:
+                    id1 = particle['id']  # Inherit parent ID
+                    id2 = self.next_id
+                    self.next_id += 1
+                else:
+                    id1 = self.next_id
+                    self.next_id += 1
+                    id2 = particle['id']
+            else:
+                # Both children get new IDs
+                id1 = self.next_id
+                self.next_id += 1
+                id2 = self.next_id
+                self.next_id += 1
+
+            # Create child particles
+            child1 = {
+                'id': id1,
+                'true_id': particle['true_id'],
+                'position': (pos[0] + offset, pos[1] + offset),
+                'velocity': (vel[0] + offset * 0.1, vel[1] + offset * 0.1),
+                'mass': mass1,
+                'active': True,
+                'parents': [particle['id']],
+                'frame_created': self.current_frame,
+                'split_depth': particle.get('split_depth', 0) + 1,
+                'merge_depth': particle.get('merge_depth', 0),
+            }
+
+            child2 = {
+                'id': id2,
+                'true_id': particle['true_id'],
+                'position': (pos[0] - offset, pos[1] - offset),
+                'velocity': (vel[0] - offset * 0.1, vel[1] - offset * 0.1),
+                'mass': mass2,
+                'active': True,
+                'parents': [particle['id']],
+                'frame_created': self.current_frame,
+                'split_depth': particle.get('split_depth', 0) + 1,
+                'merge_depth': particle.get('merge_depth', 0),
+            }
+
+            # Add children to particle list and deactivate parent
+            self.particles.append(child1)
+            self.particles.append(child2)
+            particle['active'] = False
+            self.recent_event_particles[particle['id']] = self.current_frame
+
+            self.current_frame_events['splits'].append((particle['id'], child1['id'], child2['id']))
+            split_info.append((child1, child2))
+
         return split_info
-
-    def _process_linking_split(self, particle, mass1, mass2, dx, dy, dz):
-        """Process a linking split where one particle continues"""
-        self.record_particle_state(particle, EventLabel.SPLIT)
-        
-        # Determine which mass continues (larger one)
-        if mass1 >= mass2:
-            new_x = particle['x'] - dx/2
-            new_y = particle['y'] - dy/2
-            new_z = particle['z'] - dz/2
-            continuing_mass = mass1
-            
-            # Create child lineage for new particle
-            child_lineage = particle['parent_ids'].copy()
-            child_lineage.append(particle['id'])
-            child2_id = self.add_particle(
-                particle['x'] + dx/2, particle['y'] + dy/2, particle['z'] + dz/2,
-                mass2, parent_ids=child_lineage, inherit_cooldown=True
-            )
-            
-            # Record POST_SPLIT state for new child
-            child2 = next(p for p in self.particles if p['id'] == child2_id)
-            self.record_particle_state(child2, EventLabel.POST_SPLIT)
-            
-            # Update event tracking
-            self.recent_event_particles[particle['id']] = self.current_frame
-            self.recent_event_particles[child2_id] = self.current_frame
-            
-            # Record split event
-            self.current_frame_events['splits'].append({
-                'parent_id': particle['id'],
-                'child_ids': [particle['id'], child2_id],
-                'is_linking': True
-            })
-        else:
-            new_x = particle['x'] + dx/2
-            new_y = particle['y'] + dy/2
-            new_z = particle['z'] + dz/2
-            continuing_mass = mass2
-            
-            # Create child lineage for new particle
-            child_lineage = particle['parent_ids'].copy()
-            child_lineage.append(particle['id'])
-            child1_id = self.add_particle(
-                particle['x'] - dx/2, particle['y'] - dy/2, particle['z'] - dz/2,
-                mass1, parent_ids=child_lineage, inherit_cooldown=True
-            )
-            
-            # Record POST_SPLIT state for new child
-            child1 = next(p for p in self.particles if p['id'] == child1_id)
-            self.record_particle_state(child1, EventLabel.POST_SPLIT)
-            
-            # Update event tracking
-            self.recent_event_particles[particle['id']] = self.current_frame
-            self.recent_event_particles[child1_id] = self.current_frame
-            
-            # Record split event
-            self.current_frame_events['splits'].append({
-                'parent_id': particle['id'],
-                'child_ids': [child1_id, particle['id']],
-                'is_linking': True
-            })
-        
-        # Update continuing particle - DON'T update parent lineage for continuing particle
-        self.update_existing_particle(particle, new_x, new_y, new_z, 
-                                    continuing_mass, particle['parent_ids'])
-        particle['last_event_frame'] = self.current_frame
-        
-        # Record post split state after split
-        self.record_particle_state(particle, EventLabel.POST_SPLIT)
-
-    def _process_normal_split(self, particle, mass1, mass2, dx, dy, dz):
-        """Process a normal split where particle disappears and two new ones are created"""
-        self.record_particle_state(particle, EventLabel.SPLIT)
-        
-        # Deactivate parent particle
-        particle['active'] = False
-        particle['death_frame'] = self.current_frame
-        particle['last_event_frame'] = self.current_frame
-        
-        # Create child lineage - both children get the same lineage
-        child_lineage = particle['parent_ids'].copy()
-        child_lineage.append(particle['id'])
-        
-        # Create two new particles
-        child1_id = self.add_particle(
-            particle['x'] - dx/2, particle['y'] - dy/2, particle['z'] - dz/2,
-            mass1, parent_ids=child_lineage.copy(), inherit_cooldown=True
-        )
-        child2_id = self.add_particle(
-            particle['x'] + dx/2, particle['y'] + dy/2, particle['z'] + dz/2,
-            mass2, parent_ids=child_lineage.copy(), inherit_cooldown=True
-        )
-        
-        # Record POST_SPLIT state for both children
-        child1 = next(p for p in self.particles if p['id'] == child1_id)
-        child2 = next(p for p in self.particles if p['id'] == child2_id)
-        self.record_particle_state(child1, EventLabel.POST_SPLIT)
-        self.record_particle_state(child2, EventLabel.POST_SPLIT)
-        
-        # Update event tracking - all three particles are in cooldown
-        self.recent_event_particles[particle['id']] = self.current_frame
-        self.recent_event_particles[child1_id] = self.current_frame
-        self.recent_event_particles[child2_id] = self.current_frame
-        
-        # Record split event
-        self.current_frame_events['splits'].append({
-            'parent_id': particle['id'],
-            'child_ids': [child1_id, child2_id],
-            'is_linking': False
-        })
 
     def process_normal_update_phase(self, active_particles, merged_info, split_info, dt=0.1):
         """Phase 3: Process normal updates for particles not deactivated in merge/split events"""

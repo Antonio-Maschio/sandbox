@@ -31,6 +31,7 @@ def build_particle_graph(df, radius_buffer=0.0, sim_id=0, max_gap_frames=3):
     
     # Add proximity edges
     radius = max_displacement + radius_buffer
+    # print("RADIUS VALUE --- >",radius)
     add_proximity_edges(df, radius, edge_list, edge_features, edge_types, edge_gap_lengths)
     
     # Convert to tensors
@@ -54,7 +55,7 @@ def build_particle_graph(df, radius_buffer=0.0, sim_id=0, max_gap_frames=3):
         detection_stats=get_detection_statistics(df)
     )
 
-def add_temporal_edges_with_gaps(df, edge_list, edge_features, edge_types, edge_gap_lengths, max_gap_frames):
+def add_temporal_edges_with_gaps(df, edge_list, edge_features, edge_types, edge_gap_lengths, max_gap_frames,Verbose=False):
     """
     Add temporal edges between consecutive detections of the same particle.
     Handles detection gaps by connecting across missing frames.
@@ -98,11 +99,12 @@ def add_temporal_edges_with_gaps(df, edge_list, edge_features, edge_types, edge_
                 # Gap too large - particle was lost and reappeared
                 # Could optionally add a different edge type here
                 pass
-    
-    print(f"Temporal edges: {direct_edges} direct, {gap_spanning_edges} gap-spanning")
+    if Verbose:
+        print(f"Temporal edges: {direct_edges} direct, {gap_spanning_edges} gap-spanning")
+
     return max_displacement
 
-def add_proximity_edges(df, radius, edge_list, edge_features, edge_types, edge_gap_lengths):
+def add_proximity_edges(df, radius, edge_list, edge_features, edge_types, edge_gap_lengths, Verbose=False):
     """
     Add proximity edges between particles in consecutive frames.
     Handles sparse data due to detection gaps.
@@ -152,8 +154,8 @@ def add_proximity_edges(df, radius, edge_list, edge_features, edge_types, edge_g
                 edge_types.extend([1, 1])  # 1 for proximity edges
                 edge_gap_lengths.extend([frame_gap, frame_gap])  # Frame gap for proximity edges
                 proximity_edges += 1
-    
-    print(f"Proximity edges: {proximity_edges}")
+    if Verbose:
+        print(f"Proximity edges: {proximity_edges}")
 
 def get_detection_statistics(df):
     """

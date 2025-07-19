@@ -458,8 +458,8 @@ if __name__ == "__main__":
     
     print("Loading and normalizing data...")
     df_norm, norm_params, graph = norm_data_with_preprocessor(
-        "data/tracked_simdata_3d_temporal_v3/tracked_particles_3d_00000.csv",
-        radius_buff=-22,
+        "data/tracked_simdata_dirty/tracked_particles_3d_00000.csv",
+        radius_buff=0,
         normalize_method='standard'
     )
     

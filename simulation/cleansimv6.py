@@ -16,199 +16,280 @@ class EventLabel(IntEnum):
     POST_MERGE = 3
     POST_SPLIT = 4
 
+
 class TrackedParticleSimulator:
     def __init__(self, 
-                 x_range=(0, 200), y_range=(0, 200), z_range=(0, 200),
-                 min_mass=50000, max_mass=500000,
-                 temperature=300, viscosity=0.1, pixel_size=100,
-                 merge_distance_factor=2.0, split_mass_threshold=100000,
-                 merge_prob=0.7, split_prob=0.005,
-                 merge_linking_prob=0.8, split_linking_prob=0.8,
-                 spontaneous_appear_prob=0.002, spontaneous_disappear_prob=0.001,
-                 position_noise_sigma=0.5, mass_noise_cv=0.1,
-                 reflective_boundaries=True, event_cooldown=5,
-                 enable_warnings=True, detection_prob=0.95, max_undetectable_frames=3):
+                 x_range=(0, 200),
+                 y_range=(0, 200),
+                 z_range=(0, 200),
+                 min_mass=50000,
+                 max_mass=500000,
+                 temperature=300,
+                 viscosity=0.1,
+                 pixel_size=100,
+                 merge_distance_factor=2.0,
+                 split_mass_threshold=100000,
+                 merge_prob=0.7,
+                 split_prob=0.005,
+                 merge_linking_prob=0.8,
+                 split_linking_prob=0.8,
+                 spontaneous_appear_prob=0.002,
+                 spontaneous_disappear_prob=0.001,
+                 position_noise_sigma=0.5,
+                 mass_noise_cv=0.1,
+                 reflective_boundaries=True,
+                 event_cooldown=5,
+                 enable_warnings=True,
+                 detection_prob=0.95,
+                 max_undetectable_frames=3):
         
-        # Simulation boundaries
         self.x_range = x_range
         self.y_range = y_range
         self.z_range = z_range
         self.min_mass = min_mass
         self.max_mass = max_mass
         
-        # Physics constants
         self.kB = 1.38e-23
         self.T = temperature
         self.eta = viscosity
         self.pixel_size = pixel_size
         
-        # Event parameters
         self.merge_distance_factor = merge_distance_factor
         self.split_mass_threshold = split_mass_threshold
         self.merge_prob = merge_prob
         self.split_prob = split_prob
+        
         self.merge_linking_prob = merge_linking_prob
         self.split_linking_prob = split_linking_prob
+        
         self.spontaneous_appear_prob = spontaneous_appear_prob
         self.spontaneous_disappear_prob = spontaneous_disappear_prob
         
-        # Noise parameters
         self.position_noise_sigma = position_noise_sigma
         self.mass_noise_cv = mass_noise_cv
         
-        # Simulation settings
         self.reflective_boundaries = reflective_boundaries
         self.event_cooldown = event_cooldown
         self.enable_warnings = enable_warnings
+        
+        # Detection simulation parameters
         self.detection_prob = detection_prob
         self.max_undetectable_frames = max_undetectable_frames
         
-        # State tracking
         self.particles = []
         self.next_id = 0
         self.current_frame = 0
+        
+        # Track all events across simulation
         self.all_merges = []
         self.all_splits = []
+        
+        # Frame synchronization tracking
         self.frame_warnings = []
+        
+        # Track pending events that need POST labels in next frame
         self.pending_post_events = []
 
     def log_warning(self, message):
+        """Log a warning message"""
         if self.enable_warnings:
             warning_msg = f"FRAME {self.current_frame}: {message}"
             print(f"WARNING: {warning_msg}")
             self.frame_warnings.append(warning_msg)
 
     def validate_particle_frame_consistency(self, particle, context=""):
+        """Validate that particle frame data is consistent"""
         if not particle['active']:
             return True
             
+        # Check birth frame
         if particle['birth_frame'] > self.current_frame:
-            self.log_warning(f"SYNC ERROR - {context} Particle {particle['id']} has future birth_frame")
+            self.log_warning(f"SYNC ERROR - {context} Particle {particle['id']} has future birth_frame={particle['birth_frame']} > current_frame={self.current_frame}")
             return False
             
+        # Check death frame
         if particle['death_frame'] is not None and particle['death_frame'] < self.current_frame:
-            self.log_warning(f"SYNC ERROR - {context} Active particle {particle['id']} has past death_frame")
+            self.log_warning(f"SYNC ERROR - {context} Active particle {particle['id']} has past death_frame={particle['death_frame']} < current_frame={self.current_frame}")
             return False
             
+        # Check trajectory length consistency
         expected_recordings = self.current_frame - particle['birth_frame']
         actual_recordings = len(particle['trajectory'])
         
-        if actual_recordings > expected_recordings + 1:
-            self.log_warning(f"SYNC ERROR - {context} Particle {particle['id']} has too many recordings")
+        if actual_recordings > expected_recordings + 1:  # +1 because we might be mid-recording
+            self.log_warning(f"SYNC ERROR - {context} Particle {particle['id']} has too many recordings: {actual_recordings} > expected {expected_recordings + 1}")
             return False
             
         return True
 
     def process_detection(self, particle):
+        """Process detection probability for a particle"""
         if not particle['active']:
             return
             
+        # Roll for detection
         if np.random.random() < particle['detection_prob']:
+            # Successfully detected
             if not particle['detectable']:
+                # Particle is being re-detected after being undetectable
                 if self.enable_warnings:
-                    print(f"🔍 RE-DETECTION: Particle {particle['id']} after {particle['consecutive_undetectable']} frames")
+                    print(f"🔍 RE-DETECTION: Particle {particle['id']} detected after {particle['consecutive_undetectable']} frames")
             
             particle['detectable'] = True
             particle['last_detected_frame'] = self.current_frame
             particle['consecutive_undetectable'] = 0
         else:
-            if particle['detectable'] and self.enable_warnings:
-                print(f"👻 DETECTION LOST: Particle {particle['id']} at frame {self.current_frame}")
+            # Detection failed
+            if particle['detectable']:
+                # First frame of being undetectable
+                if self.enable_warnings:
+                    print(f"👻 DETECTION LOST: Particle {particle['id']} becomes undetectable at frame {self.current_frame}")
             
             particle['detectable'] = False
             particle['undetectable_frames'].append(self.current_frame)
             particle['consecutive_undetectable'] += 1
             
+            # Check if particle has been undetectable for too long
             if particle['consecutive_undetectable'] > self.max_undetectable_frames:
                 if self.enable_warnings:
-                    print(f"💀 TRACKING LOST: Particle {particle['id']} after {particle['consecutive_undetectable']} frames")
+                    print(f"💀 TRACKING LOST: Particle {particle['id']} undetectable for {particle['consecutive_undetectable']} frames - marking as dead")
+                # Particle is considered truly lost
                 particle['active'] = False
                 particle['death_frame'] = self.current_frame
 
     def record_particle_state(self, particle, label):
+        """Record the current state of a particle - ONLY if detectable"""
         particle_id = particle['id']
         
+        # DETECTION CHECK: Only record detectable particles
         if not particle.get('detectable', True):
             if self.enable_warnings:
-                print(f"👻 SKIP RECORD: Particle {particle_id} not detectable")
+                print(f"👻 SKIP RECORD: Particle {particle_id} not detectable this frame")
             return
         
+        # Check if already recorded this frame
         if particle.get('recorded_this_frame', False):
-            self.log_warning(f"DOUBLE RECORD - Particle {particle_id} already recorded")
+            self.log_warning(f"DOUBLE RECORD - Particle {particle_id} already recorded in frame {self.current_frame}")
             return
             
+        # Check if particle is active
         if not particle['active']:
             self.log_warning(f"INACTIVE RECORD - Recording inactive particle {particle_id}")
             return
             
+        # Check frame consistency
         if not self.validate_particle_frame_consistency(particle, "RECORD"):
             return
             
+        # For particles with detection gaps, we need to handle trajectory differently
         expected_frame = particle['birth_frame'] + len(particle['trajectory'])
         if expected_frame != self.current_frame:
+            # This might be due to detection gaps, which is now valid
             gap_size = self.current_frame - expected_frame
-            if gap_size > 0 and self.enable_warnings:
-                print(f"🔍 DETECTION GAP: Particle {particle_id} has {gap_size} frame gap")
+            if gap_size > 0:
+                if self.enable_warnings:
+                    print(f"🔍 DETECTION GAP: Particle {particle_id} has {gap_size} frame gap due to detection issues")
             
+        # Check if recording after death
         if particle['death_frame'] is not None and self.current_frame > particle['death_frame']:
-            self.log_warning(f"POSTHUMOUS RECORD - Particle {particle_id} recorded after death")
+            self.log_warning(f"POSTHUMOUS RECORD - Recording particle {particle_id} at frame {self.current_frame} after death_frame {particle['death_frame']}")
             return
-        
-        if self.enable_warnings and label != EventLabel.NORMAL:
-            print(f"DEBUG RECORD: Frame {self.current_frame} - Particle {particle_id} with {EventLabel(label).name}")
             
+        # Validate trajectory/mass/label consistency
+        if len(particle['trajectory']) != len(particle['mass_history']):
+            self.log_warning(f"HISTORY MISMATCH - Particle {particle_id} trajectory length {len(particle['trajectory'])} != mass history length {len(particle['mass_history'])}")
+            
+        if len(particle['trajectory']) != len(particle['label_history']):
+            self.log_warning(f"HISTORY MISMATCH - Particle {particle_id} trajectory length {len(particle['trajectory'])} != label history length {len(particle['label_history'])}")
+        
+        # DEBUG: Track what we're recording
+        if self.enable_warnings and label != EventLabel.NORMAL:
+            print(f"DEBUG RECORD: Frame {self.current_frame} - Recording particle {particle_id} with label {EventLabel(label).name}")
+            
+        # Record the state with frame information for gap handling
         particle['trajectory'].append((particle['x'], particle['y'], particle['z'], self.current_frame))
         particle['mass_history'].append(particle['mass'])
         particle['label_history'].append(label)
         particle['recorded_this_frame'] = True
         particle['last_recorded_frame'] = self.current_frame
+        
+        # Validate post-recording state
+        if len(particle['trajectory']) != len(particle['mass_history']) or len(particle['trajectory']) != len(particle['label_history']):
+            self.log_warning(f"POST-RECORD MISMATCH - Particle {particle_id} histories out of sync after recording")
 
     def add_particle(self, x, y, z, mass, parent_ids=None, birth_frame=None):
+        """Add a new particle with validation"""
         if birth_frame is None:
             birth_frame = self.current_frame
+            
         if parent_ids is None:
             parent_ids = []
             
+        # Validate birth frame
         if birth_frame > self.current_frame + 1:
-            self.log_warning(f"FUTURE BIRTH - Particle birth_frame too far in future")
-        if birth_frame < 0:
-            self.log_warning(f"NEGATIVE BIRTH - Negative birth_frame")
-            birth_frame = 0
-        if mass < self.min_mass or mass > self.max_mass:
-            self.log_warning(f"MASS OUT OF BOUNDS - Mass {mass} outside bounds")
+            self.log_warning(f"FUTURE BIRTH - Creating particle with far future birth_frame {birth_frame} > current_frame+1 {self.current_frame + 1}")
             
-        for parent_id in parent_ids:
-            parent_particle = next((p for p in self.particles if p['id'] == parent_id), None)
-            if parent_particle is None:
-                self.log_warning(f"INVALID PARENT - Parent ID {parent_id} not found")
-            elif parent_particle['active'] and birth_frame <= self.current_frame:
-                self.log_warning(f"ACTIVE PARENT - Parent {parent_id} still active for current/past birth")
+        if birth_frame < 0:
+            self.log_warning(f"NEGATIVE BIRTH - Creating particle with negative birth_frame {birth_frame}")
+            birth_frame = 0
+            
+        # Validate mass
+        if mass < self.min_mass or mass > self.max_mass:
+            self.log_warning(f"MASS OUT OF BOUNDS - Particle mass {mass} outside bounds [{self.min_mass}, {self.max_mass}]")
+            
+        # Validate parent IDs
+        if parent_ids:
+            for parent_id in parent_ids:
+                parent_particle = next((p for p in self.particles if p['id'] == parent_id), None)
+                if parent_particle is None:
+                    self.log_warning(f"INVALID PARENT - Parent ID {parent_id} not found")
+                elif parent_particle['active'] and birth_frame > self.current_frame:
+                    # This is okay for linking events - parent is still active but child will be born next frame
+                    pass
+                elif parent_particle['active'] and birth_frame <= self.current_frame:
+                    self.log_warning(f"ACTIVE PARENT - Parent particle {parent_id} is still active for current/past birth")
         
         volume = mass / 100000
         radius = np.cbrt(3 * volume / (4 * np.pi)) * 100
         D = self.kB * self.T / (6 * np.pi * self.eta * radius * 1e-9)
+        
+        # Particle starts inactive if born in future frame
         is_active = birth_frame <= self.current_frame
         
         particle = {
             'id': self.next_id,
             'parent_ids': parent_ids.copy(),
-            'x': x, 'y': y, 'z': z, 'mass': mass, 'radius': radius,
+            'x': x,
+            'y': y,
+            'z': z,
+            'mass': mass,
+            'radius': radius,
             'D': D * 1e18 / (self.pixel_size**2),
             'active': is_active,
-            'birth_frame': birth_frame, 'death_frame': None,
-            'trajectory': [], 'mass_history': [], 'label_history': [],
+            'birth_frame': birth_frame,
+            'death_frame': None,
+            'trajectory': [],
+            'mass_history': [],
+            'label_history': [],
             'last_event_frame': -float('inf'),
-            'recorded_this_frame': False, 'last_recorded_frame': -1,
-            'detectable': True, 'detection_prob': self.detection_prob,
-            'undetectable_frames': [], 'last_detected_frame': -1,
+            'recorded_this_frame': False,
+            'last_recorded_frame': -1,
+            
+            # Detection simulation properties
+            'detectable': True,
+            'detection_prob': self.detection_prob,
+            'undetectable_frames': [],
+            'last_detected_frame': -1,
             'consecutive_undetectable': 0
         }
         
         self.particles.append(particle)
         self.next_id += 1
+        
         return particle['id']
     
     def update_particle_properties(self, particle, x, y, z, mass, parent_ids=None):
+        """Update particle properties with validation"""
         if not particle['active']:
             self.log_warning(f"INACTIVE UPDATE - Updating inactive particle {particle['id']}")
             return
@@ -216,26 +297,38 @@ class TrackedParticleSimulator:
         if parent_ids is not None:
             particle['parent_ids'] = parent_ids.copy()
             
+        # Validate mass
         if mass < self.min_mass or mass > self.max_mass:
-            self.log_warning(f"MASS UPDATE OUT OF BOUNDS - Mass {mass} outside bounds")
+            self.log_warning(f"MASS UPDATE OUT OF BOUNDS - Particle {particle['id']} mass {mass} outside bounds [{self.min_mass}, {self.max_mass}]")
             
         volume = mass / 100000
         radius = np.cbrt(3 * volume / (4 * np.pi)) * 100
         D = self.kB * self.T / (6 * np.pi * self.eta * radius * 1e-9)
         
-        particle.update({'x': x, 'y': y, 'z': z, 'mass': mass, 'radius': radius,
-                        'D': D * 1e18 / (self.pixel_size**2)})
+        particle['x'] = x
+        particle['y'] = y
+        particle['z'] = z
+        particle['mass'] = mass
+        particle['radius'] = radius
+        particle['D'] = D * 1e18 / (self.pixel_size**2)
 
     def can_have_event(self, particle):
+        """Check if particle can have an event (merge/split) with validation"""
         if not particle['active']:
             return False
+            
+        # Check cooldown period
         if self.current_frame - particle['last_event_frame'] <= self.event_cooldown:
             return False
+        
+        # Check if recently born from event
         if particle['parent_ids'] and self.current_frame - particle['birth_frame'] <= self.event_cooldown:
             return False
+            
         return True
 
     def update_particle_position(self, particle, dt=0.1):
+        """Update particle position with Brownian motion"""
         if not particle['active']:
             self.log_warning(f"POSITION UPDATE - Updating position of inactive particle {particle['id']}")
             return False
@@ -271,7 +364,7 @@ class TrackedParticleSimulator:
             if (new_x < self.x_range[0] or new_x > self.x_range[1] or 
                 new_y < self.y_range[0] or new_y > self.y_range[1] or
                 new_z < self.z_range[0] or new_z > self.z_range[1]):
-                return True
+                return True  # Left boundaries
         
         particle['x'] = new_x
         particle['y'] = new_y
@@ -279,14 +372,18 @@ class TrackedParticleSimulator:
         return False
     
     def find_merge_candidates(self, particles):
+        """Find potential merge candidates using spatial proximity"""
         if len(particles) < 2:
             return []
             
+        # Validate input particles
         for particle in particles:
-            self.validate_particle_frame_consistency(particle, "MERGE_CANDIDATE")
+            if not self.validate_particle_frame_consistency(particle, "MERGE_CANDIDATE"):
+                continue
                 
         positions = np.array([[p['x'], p['y'], p['z']] for p in particles])
         tree = KDTree(positions)
+        
         merge_pairs = []
         
         for i, p1 in enumerate(particles):
@@ -302,6 +399,7 @@ class TrackedParticleSimulator:
                 p2 = particles[j]
                 if not self.can_have_event(p2):
                     continue
+
                 if p1['mass'] + p2['mass'] > self.max_mass:
                     continue
 
@@ -313,45 +411,57 @@ class TrackedParticleSimulator:
         return merge_pairs
 
     def process_merge(self, p1, p2):
+        """Process a merge event between two particles with proper two-phase timing"""
+        # Validate particles before merge
         if not self.validate_particle_frame_consistency(p1, "MERGE_P1"):
             return
         if not self.validate_particle_frame_consistency(p2, "MERGE_P2"):
             return
             
         if not p1['active'] or not p2['active']:
-            self.log_warning(f"MERGE INACTIVE - Attempting to merge inactive particles")
+            self.log_warning(f"MERGE INACTIVE - Attempting to merge inactive particles {p1['id']} (active={p1['active']}) and {p2['id']} (active={p2['active']})")
             return
             
+        # Check for mass conservation
         total_mass = p1['mass'] + p2['mass']
         if total_mass <= 0:
-            self.log_warning(f"MERGE ZERO MASS - Invalid mass conservation")
+            self.log_warning(f"MERGE ZERO MASS - Merge would result in zero/negative mass: {p1['mass']} + {p2['mass']} = {total_mass}")
             return
             
         new_x = (p1['x'] * p1['mass'] + p2['x'] * p2['mass']) / total_mass
         new_y = (p1['y'] * p1['mass'] + p2['y'] * p2['mass']) / total_mass
         new_z = (p1['z'] * p1['mass'] + p2['z'] * p2['mass']) / total_mass
         
+        # DEBUG: Track merge event
         if self.enable_warnings:
             print(f"DEBUG: Frame {self.current_frame} - Processing merge between particles {p1['id']} and {p2['id']}")
         
         if np.random.random() < self.merge_linking_prob:
-            # Linking merge
+            # LINKING MERGE - one particle continues, one disappears
             continuing_particle = p1 if np.random.random() < 0.5 else p2
             disappearing_particle = p2 if continuing_particle == p1 else p1
             
+            # DEBUG
             if self.enable_warnings:
-                print(f"🔗 LINKING MERGE: {disappearing_particle['id']} disappears, {continuing_particle['id']} continues")
+                print(f"\n🔗 LINKING MERGE ANALYSIS - Frame {self.current_frame}")
+                print(f"   Disappearing: Particle {disappearing_particle['id']} (mass={disappearing_particle['mass']:.0f})")
+                print(f"   Continuing:   Particle {continuing_particle['id']} (mass={continuing_particle['mass']:.0f})")
+                print(f"   New mass:     {total_mass:.0f}")
+                print(f"   Expected next frame: Continuing particle gets POST_MERGE")
             
+            # PHASE 1: Record both particles with MERGE label (this frame)
             self.record_particle_state(disappearing_particle, EventLabel.MERGE)
             self.record_particle_state(continuing_particle, EventLabel.MERGE)
             
             disappearing_particle['active'] = False
             disappearing_particle['death_frame'] = self.current_frame
             
+            # Update continuing particle with merged properties
             merged_lineage = []
             merged_lineage.extend(continuing_particle['parent_ids'])
             merged_lineage.extend(disappearing_particle['parent_ids'])
             merged_lineage.append(disappearing_particle['id'])
+            # Remove duplicates while preserving order
             seen = set()
             merged_lineage = [x for x in merged_lineage if not (x in seen or seen.add(x))]
             
@@ -359,11 +469,13 @@ class TrackedParticleSimulator:
                                           total_mass, merged_lineage)
             continuing_particle['last_event_frame'] = self.current_frame
             
+            # PHASE 2: Schedule POST_MERGE label for next frame
             self.pending_post_events.append({
                 'type': 'POST_MERGE',
                 'particle_ids': [continuing_particle['id']]
             })
             
+            # Track event
             self.all_merges.append({
                 'parent_ids': [p1['id'], p2['id']],
                 'child_id': continuing_particle['id'],
@@ -372,10 +484,16 @@ class TrackedParticleSimulator:
             })
             
         else:
-            # Normal merge
+            # NORMAL MERGE - both particles disappear, new one created
+            # DEBUG
             if self.enable_warnings:
-                print(f"⚫ NORMAL MERGE: {p1['id']} and {p2['id']} disappear, creating new particle")
+                print(f"\n⚫ NORMAL MERGE ANALYSIS - Frame {self.current_frame}")
+                print(f"   Parent 1:     Particle {p1['id']} (mass={p1['mass']:.0f})")
+                print(f"   Parent 2:     Particle {p2['id']} (mass={p2['mass']:.0f})")
+                print(f"   New mass:     {total_mass:.0f}")
+                print(f"   Expected next frame: New particle gets POST_MERGE")
             
+            # PHASE 1: Record both particles with MERGE label (this frame)
             self.record_particle_state(p1, EventLabel.MERGE)
             self.record_particle_state(p2, EventLabel.MERGE)
             
@@ -384,6 +502,7 @@ class TrackedParticleSimulator:
             p2['active'] = False
             p2['death_frame'] = self.current_frame
             
+            # Create merged lineage including both parents
             merged_lineage = []
             merged_lineage.extend(p1['parent_ids'])
             merged_lineage.append(p1['id'])
@@ -392,19 +511,23 @@ class TrackedParticleSimulator:
             seen = set()
             merged_lineage = [x for x in merged_lineage if not (x in seen or seen.add(x))]
             
+            # Create new particle (born next frame)
             new_id = self.add_particle(new_x, new_y, new_z, total_mass, 
                                      parent_ids=merged_lineage, birth_frame=self.current_frame + 1)
             new_particle = next(p for p in self.particles if p['id'] == new_id)
             new_particle['last_event_frame'] = self.current_frame
             
+            # DEBUG
             if self.enable_warnings:
-                print(f"   Created: Particle {new_id}")
+                print(f"   Created:      Particle {new_id} (birth_frame={new_particle['birth_frame']})")
             
+            # PHASE 2: Schedule POST_MERGE label for next frame
             self.pending_post_events.append({
                 'type': 'POST_MERGE',
                 'particle_ids': [new_id]
             })
             
+            # Track event
             self.all_merges.append({
                 'parent_ids': [p1['id'], p2['id']],
                 'child_id': new_id,
@@ -413,6 +536,8 @@ class TrackedParticleSimulator:
             })
 
     def process_split(self, particle):
+        """Process a split event for a particle with proper two-phase timing"""
+        # Validate particle before split
         if not self.validate_particle_frame_consistency(particle, "SPLIT"):
             return
             
@@ -421,31 +546,34 @@ class TrackedParticleSimulator:
             return
             
         if particle['mass'] < self.split_mass_threshold:
-            self.log_warning(f"SPLIT MASS TOO LOW - Particle {particle['id']} mass below threshold")
+            self.log_warning(f"SPLIT MASS TOO LOW - Particle {particle['id']} mass {particle['mass']} < threshold {self.split_mass_threshold}")
             return
             
         ratio = np.random.uniform(0.4, 0.6)
         mass1 = particle['mass'] * ratio
         mass2 = particle['mass'] * (1 - ratio)
         
+        # Check mass conservation
         if abs((mass1 + mass2) - particle['mass']) > 1e-6:
-            self.log_warning(f"SPLIT MASS CONSERVATION - Mass conservation error")
+            self.log_warning(f"SPLIT MASS CONSERVATION - Mass conservation error: {mass1} + {mass2} != {particle['mass']}")
             
         phi = np.random.uniform(0, 2 * np.pi)
         theta = np.random.uniform(0, np.pi)
-        sep_dist = np.random.uniform(1, 7)
+        sep_dist = np.random.uniform(1, 12)
         
         dx = sep_dist * np.sin(theta) * np.cos(phi)
         dy = sep_dist * np.sin(theta) * np.sin(phi)
         dz = sep_dist * np.cos(theta)
         
+        # DEBUG: Track split event
         if self.enable_warnings:
             print(f"DEBUG: Frame {self.current_frame} - Processing split of particle {particle['id']}")
         
         if np.random.random() < self.split_linking_prob:
-            # Linking split
+            # LINKING SPLIT - one particle continues, one new particle created
             if mass1 >= mass2:
-                continuing_mass, new_mass = mass1, mass2
+                continuing_mass = mass1
+                new_mass = mass2
                 continuing_x = particle['x'] - dx/2
                 continuing_y = particle['y'] - dy/2
                 continuing_z = particle['z'] - dz/2
@@ -453,7 +581,8 @@ class TrackedParticleSimulator:
                 new_y = particle['y'] + dy/2
                 new_z = particle['z'] + dz/2
             else:
-                continuing_mass, new_mass = mass2, mass1
+                continuing_mass = mass2
+                new_mass = mass1
                 continuing_x = particle['x'] + dx/2
                 continuing_y = particle['y'] + dy/2
                 continuing_z = particle['z'] + dz/2
@@ -461,29 +590,40 @@ class TrackedParticleSimulator:
                 new_y = particle['y'] - dy/2
                 new_z = particle['z'] - dz/2
             
+            # DEBUG
             if self.enable_warnings:
-                print(f"🔗 LINKING SPLIT: Particle {particle['id']} continues, creating new particle")
+                print(f"\n🔗 LINKING SPLIT ANALYSIS - Frame {self.current_frame}")
+                print(f"   Parent:       Particle {particle['id']} (mass={particle['mass']:.0f})")
+                print(f"   Continuing:   Particle {particle['id']} (new mass={continuing_mass:.0f})")
+                print(f"   New child:    Mass={new_mass:.0f}")
+                print(f"   Expected next frame: BOTH particles get POST_SPLIT")
             
+            # PHASE 1: Record continuing particle with SPLIT label (this frame)
             self.record_particle_state(particle, EventLabel.SPLIT)
             
+            # Update continuing particle properties
             self.update_particle_properties(particle, continuing_x, continuing_y, continuing_z, 
                                           continuing_mass)
             particle['last_event_frame'] = self.current_frame
             
+            # Create new particle with parent lineage
             child_lineage = particle['parent_ids'].copy()
             new_id = self.add_particle(new_x, new_y, new_z, new_mass, 
                                      parent_ids=child_lineage, birth_frame=self.current_frame + 1)
             new_particle = next(p for p in self.particles if p['id'] == new_id)
             new_particle['last_event_frame'] = self.current_frame
             
+            # DEBUG
             if self.enable_warnings:
-                print(f"   Created: Particle {new_id}")
+                print(f"   Created:      Particle {new_id} (birth_frame={new_particle['birth_frame']})")
             
+            # PHASE 2: Schedule POST_SPLIT labels for next frame (BOTH particles in linking split)
             self.pending_post_events.append({
                 'type': 'POST_SPLIT',
-                'particle_ids': [particle['id'], new_id]
+                'particle_ids': [particle['id'], new_id]  # Both continuing AND new particle get POST_SPLIT
             })
             
+            # Track event
             child_ids = [particle['id'], new_id] if mass1 >= mass2 else [new_id, particle['id']]
             self.all_splits.append({
                 'parent_id': particle['id'],
@@ -493,17 +633,25 @@ class TrackedParticleSimulator:
             })
             
         else:
-            # Normal split
+            # NORMAL SPLIT - parent disappears, two new particles created
+            # DEBUG
             if self.enable_warnings:
-                print(f"⚫ NORMAL SPLIT: Particle {particle['id']} disappears, creating two particles")
+                print(f"\n⚫ NORMAL SPLIT ANALYSIS - Frame {self.current_frame}")
+                print(f"   Parent:       Particle {particle['id']} (mass={particle['mass']:.0f})")
+                print(f"   Child 1:      Mass={mass1:.0f}")
+                print(f"   Child 2:      Mass={mass2:.0f}")
+                print(f"   Expected next frame: BOTH children get POST_SPLIT")
             
+            # PHASE 1: Record parent with SPLIT label (this frame)
             self.record_particle_state(particle, EventLabel.SPLIT)
             particle['active'] = False
             particle['death_frame'] = self.current_frame
             
+            # Create child lineage including the parent
             child_lineage = particle['parent_ids'].copy()
             child_lineage.append(particle['id'])
             
+            # Create two new particles (born next frame)
             child1_id = self.add_particle(
                 particle['x'] - dx/2, particle['y'] - dy/2, particle['z'] - dz/2,
                 mass1, parent_ids=child_lineage.copy(), birth_frame=self.current_frame + 1
@@ -519,14 +667,18 @@ class TrackedParticleSimulator:
             child1['last_event_frame'] = self.current_frame
             child2['last_event_frame'] = self.current_frame
             
+            # DEBUG
             if self.enable_warnings:
-                print(f"   Created: Particles {child1_id} and {child2_id}")
+                print(f"   Created:      Particle {child1_id} (birth_frame={child1['birth_frame']})")
+                print(f"   Created:      Particle {child2_id} (birth_frame={child2['birth_frame']})")
             
+            # PHASE 2: Schedule POST_SPLIT labels for next frame
             self.pending_post_events.append({
                 'type': 'POST_SPLIT',
                 'particle_ids': [child1_id, child2_id]
             })
             
+            # Track event
             self.all_splits.append({
                 'parent_id': particle['id'],
                 'child_ids': [child1_id, child2_id],
@@ -534,79 +686,130 @@ class TrackedParticleSimulator:
                 'frame': self.current_frame
             })
 
-    def process_pending_post_events(self):
-        # Activate particles born this frame
-        for particle in self.particles:
-            if not particle['active'] and particle['birth_frame'] == self.current_frame:
-                particle['active'] = True
-                if self.enable_warnings:
-                    print(f"🟢 BIRTH: Activating particle {particle['id']} at frame {self.current_frame}")
-        
-        if not self.pending_post_events:
-            return
-            
-        if self.enable_warnings:
-            print(f"📋 POST-EVENT PROCESSING - Frame {self.current_frame}: {len(self.pending_post_events)} events")
-        
-        for event in self.pending_post_events:
-            event_type = event['type']
-            particle_ids = event['particle_ids']
-            
-            for particle_id in particle_ids:
-                particle = next((p for p in self.particles if p['id'] == particle_id), None)
-                if particle and particle['active']:
-                    if event_type == 'POST_MERGE':
-                        self.record_particle_state(particle, EventLabel.POST_MERGE)
-                    elif event_type == 'POST_SPLIT':
-                        self.record_particle_state(particle, EventLabel.POST_SPLIT)
-                elif self.enable_warnings:
-                    print(f"     ❌ Particle {particle_id} - not found or inactive")
-        
-        self.pending_post_events = []
+    def validate_event_labeling(self):
+        """Validate that event labeling follows correct sequence - DISABLED FOR TWO-PHASE SYSTEM"""
+        # NOTE: With two-phase event timing, validation needs to check across frames
+        # which is more complex. For now, we disable immediate validation since
+        # the two-phase system is working correctly based on debug output.
+        # POST labels appear in the frame AFTER the event, which is correct behavior.
+        pass
 
     def validate_label_sequence(self):
-        """Validate label sequences - simplified for two-phase system"""
+        """Validate label sequences for all particles"""
         for particle in self.particles:
             if not particle['label_history']:
                 continue
                 
             labels = particle['label_history']
             
+            # Check for invalid label sequences
             for i in range(len(labels) - 1):
                 current_label = labels[i]
                 next_label = labels[i + 1]
                 
+                # SPLIT should not be followed by POST_MERGE
                 if current_label == EventLabel.SPLIT and next_label == EventLabel.POST_MERGE:
                     self.log_warning(f"INVALID SEQUENCE - Particle {particle['id']} has SPLIT followed by POST_MERGE")
                 
+                # MERGE should not be followed by POST_SPLIT  
                 if current_label == EventLabel.MERGE and next_label == EventLabel.POST_SPLIT:
                     self.log_warning(f"INVALID SEQUENCE - Particle {particle['id']} has MERGE followed by POST_SPLIT")
-
-    def validate_event_labeling(self):
-        """Validate event labeling - disabled for two-phase system"""
-        pass
+                
+                # POST_MERGE should not be immediately followed by POST_SPLIT (unless there's a gap)
+                if current_label == EventLabel.POST_MERGE and next_label == EventLabel.POST_SPLIT:
+                    self.log_warning(f"SUSPICIOUS SEQUENCE - Particle {particle['id']} has POST_MERGE immediately followed by POST_SPLIT")
+                
+                # POST_SPLIT should not be immediately followed by POST_MERGE (unless there's a gap)
+                if current_label == EventLabel.POST_SPLIT and next_label == EventLabel.POST_MERGE:
+                    self.log_warning(f"SUSPICIOUS SEQUENCE - Particle {particle['id']} has POST_SPLIT immediately followed by POST_MERGE")
+            
+            # Check for multiple consecutive event labels
+            consecutive_events = []
+            for i in range(len(labels) - 1):
+                current_label = labels[i]
+                next_label = labels[i + 1]
+                
+                if current_label in [EventLabel.MERGE, EventLabel.SPLIT, EventLabel.POST_MERGE, EventLabel.POST_SPLIT]:
+                    if next_label in [EventLabel.MERGE, EventLabel.SPLIT, EventLabel.POST_MERGE, EventLabel.POST_SPLIT]:
+                        consecutive_events.append(f"frames {particle['birth_frame'] + i}-{particle['birth_frame'] + i + 1}: {current_label}->{next_label}")
+            
+            if consecutive_events:
+                self.log_warning(f"CONSECUTIVE EVENTS - Particle {particle['id']} has consecutive event labels: {consecutive_events}")
 
     def validate_frame_state(self):
-        """Validate frame state - temporarily disabled"""
+        """Validate the overall frame state after update - TEMPORARILY DISABLED"""
+        # Temporarily disable all validation to test if consecutive warnings disappear
         pass
-
-    def update(self, dt=0.1):
-        self.current_frame += 1
         
-        active_particles = [p for p in self.particles if p['active']]
-        if not active_particles:
-            self.log_warning("NO ACTIVE PARTICLES")
+        # Original validation code commented out:
+        # active_particles = [p for p in self.particles if p['active']]
+        # ... rest of validation ...
+
+    def process_pending_post_events(self):
+        """Process pending POST_MERGE and POST_SPLIT events from previous frame"""
+        # First, activate any particles that should be born this frame
+        for particle in self.particles:
+            if not particle['active'] and particle['birth_frame'] == self.current_frame:
+                particle['active'] = True
+                if self.enable_warnings:
+                    print(f"🟢 BIRTH: Activating particle {particle['id']} at birth frame {self.current_frame}")
+        
+        if not self.pending_post_events:
             return
             
-        # Reset recording flags
+        if self.enable_warnings:
+            print(f"\n📋 POST-EVENT PROCESSING - Frame {self.current_frame}")
+            print(f"   Processing {len(self.pending_post_events)} pending events from previous frame")
+        
+        for event in self.pending_post_events:
+            event_type = event['type']
+            particle_ids = event['particle_ids']
+            
+            if self.enable_warnings:
+                if event_type == 'POST_MERGE':
+                    print(f"   🔗➡️  POST_MERGE: Particles {particle_ids}")
+                elif event_type == 'POST_SPLIT':
+                    print(f"   🔗➡️  POST_SPLIT: Particles {particle_ids}")
+            
+            for particle_id in particle_ids:
+                particle = next((p for p in self.particles if p['id'] == particle_id), None)
+                if particle and particle['active']:
+                    if event_type == 'POST_MERGE':
+                        self.record_particle_state(particle, EventLabel.POST_MERGE)
+                        if self.enable_warnings:
+                            print(f"     ✅ Particle {particle_id} recorded with POST_MERGE")
+                    elif event_type == 'POST_SPLIT':
+                        self.record_particle_state(particle, EventLabel.POST_SPLIT)
+                        if self.enable_warnings:
+                            print(f"     ✅ Particle {particle_id} recorded with POST_SPLIT")
+                else:
+                    if self.enable_warnings:
+                        print(f"     ❌ Particle {particle_id} - not found or inactive")
+        
+        # Clear pending events
+        self.pending_post_events = []
+
+    def update(self, dt=0.1):
+        """Main update function with proper two-phase event timing and detection simulation"""
+        self.current_frame += 1
+        
+        # Pre-update validation
+        active_particles = [p for p in self.particles if p['active']]
+        
+        if not active_particles:
+            self.log_warning("NO ACTIVE PARTICLES - No particles to update")
+            return
+            
+        # Reset recording flags for all particles
         for particle in self.particles:
             particle['recorded_this_frame'] = False
         
-        # Process pending POST events from previous frame
+        # PHASE 0: Process pending POST events from previous frame
         self.process_pending_post_events()
         
-        # Process detection for all active particles
-        detection_status = []
+        # PHASE 0.5: Process detection for all active particles
+        if self.enable_warnings:
+            detection_status = []
         for particle in active_particles:
             old_detectable = particle.get('detectable', True)
             self.process_detection(particle)
@@ -619,54 +822,83 @@ class TrackedParticleSimulator:
         if self.enable_warnings and detection_status:
             print(f"🔍 DETECTION CHANGES Frame {self.current_frame}: {', '.join(detection_status)}")
         
+        # Get particles that haven't been recorded yet (not involved in POST events)
+        # NOTE: Physics processes ALL active particles, detection only affects recording
         unrecorded_particles = [p for p in active_particles if not p.get('recorded_this_frame', False)]
+        
+        # Validate all active particles before processing
+        for particle in unrecorded_particles:
+            self.validate_particle_frame_consistency(particle, "PRE_UPDATE")
+            
+        # Track all particles that have been processed this frame
         processed_particles = set()
         
-        # Process merge events
+        # PHASE 1: Process new merge events (record MERGE labels, schedule POST_MERGE for next frame)
         merge_candidates = self.find_merge_candidates(unrecorded_particles)
+        
         for p1, p2 in merge_candidates:
             if p1['id'] in processed_particles or p2['id'] in processed_particles:
                 continue
+                
             if np.random.random() < self.merge_prob:
+                # Track particles before processing
+                p1_id, p2_id = p1['id'], p2['id']
+                
                 self.process_merge(p1, p2)
-                processed_particles.add(p1['id'])
-                processed_particles.add(p2['id'])
+                
+                # Mark both particles as processed
+                processed_particles.add(p1_id)
+                processed_particles.add(p2_id)
         
-        # Process split events
+        # PHASE 2: Process new split events (record SPLIT labels, schedule POST_SPLIT for next frame)
         current_unrecorded = [p for p in self.particles if p['active'] and not p.get('recorded_this_frame', False)]
+        
         for particle in current_unrecorded:
             if particle['id'] in processed_particles:
                 continue
+                
             if (np.random.random() < self.split_prob and 
                 self.can_have_event(particle) and
                 particle['mass'] >= self.split_mass_threshold):
                 
+                # Calculate kinetic factor safely
                 active_D_values = [p['D'] for p in current_unrecorded if p['active']]
                 if active_D_values:
                     kinetic_factor = particle['D'] / np.mean(active_D_values)
                     if np.random.random() < kinetic_factor:
+                        particle_id = particle['id']
+                        
                         self.process_split(particle)
-                        processed_particles.add(particle['id'])
+                        
+                        # Mark particle as processed
+                        processed_particles.add(particle_id)
         
-        # Process normal updates
+        # PHASE 3: Process normal updates for remaining particles
         final_unrecorded = [p for p in self.particles if p['active'] and not p.get('recorded_this_frame', False)]
+        
         for particle in final_unrecorded:
+            # Skip if already processed
             if particle['id'] in processed_particles:
                 continue
                 
+            # Check for spontaneous disappearance
             if np.random.random() < self.spontaneous_disappear_prob:
                 self.record_particle_state(particle, EventLabel.NORMAL)
                 particle['active'] = False
                 particle['death_frame'] = self.current_frame
                 continue
             
+            # Update position (physics happens regardless of detectability)
             left_boundaries = self.update_particle_position(particle, dt)
+            
+            # Handle boundary conditions
             if left_boundaries and not self.reflective_boundaries:
                 self.record_particle_state(particle, EventLabel.NORMAL)
                 particle['active'] = False
                 particle['death_frame'] = self.current_frame
                 continue
             
+            # Record normal state (only if detectable)
             self.record_particle_state(particle, EventLabel.NORMAL)
         
         # Handle spontaneous particle appearance
@@ -677,10 +909,15 @@ class TrackedParticleSimulator:
             mass = np.random.lognormal(np.log(150000), 0.5)
             mass = np.clip(mass, self.min_mass, self.max_mass)
             new_id = self.add_particle(x, y, z, mass)
+            
             new_particle = next(p for p in self.particles if p['id'] == new_id)
             self.record_particle_state(new_particle, EventLabel.NORMAL)
+        
+        # Post-update validation (disabled for now)
+        # self.validate_frame_state()
 
     def export_to_csv(self, filename):
+        """Export simulation data to CSV with detection gap handling"""
         data = []
         export_warnings = []
         
@@ -691,17 +928,26 @@ class TrackedParticleSimulator:
                 
             death_frame = particle['death_frame'] if particle['death_frame'] is not None else self.current_frame
             
+            # Handle trajectories with detection gaps
             for i, trajectory_entry in enumerate(particle['trajectory']):
+                # Unpack trajectory entry (now includes frame)
                 if len(trajectory_entry) == 4:
                     x, y, z, frame = trajectory_entry
                 else:
+                    # Backward compatibility with old format
                     x, y, z = trajectory_entry
                     frame = particle['birth_frame'] + i
                 
-                if frame > death_frame or frame > self.current_frame:
-                    export_warnings.append(f"Particle {particle['id']} invalid frame {frame}")
+                # Validate frame bounds
+                if frame > death_frame:
+                    export_warnings.append(f"Particle {particle['id']} recording at frame {frame} > death_frame {death_frame}")
+                    break
+                    
+                if frame > self.current_frame:
+                    export_warnings.append(f"Particle {particle['id']} recording at future frame {frame} > current {self.current_frame}")
                     break
                 
+                # Calculate duration including detection gaps
                 total_duration = death_frame - particle['birth_frame'] + 1
                 detected_duration = len(particle['trajectory'])
                 
@@ -718,7 +964,9 @@ class TrackedParticleSimulator:
 
                 data.append({
                     'frame': float(frame),
-                    'x': noisy_x, 'y': noisy_y, 'z': noisy_z,
+                    'x': noisy_x,
+                    'y': noisy_y,
+                    'z': noisy_z,
                     'mass': noisy_mass,
                     'particle': float(particle['id']),
                     'duration': float(total_duration),
@@ -729,13 +977,13 @@ class TrackedParticleSimulator:
                     'undetectable_frames': ','.join(map(str, particle.get('undetectable_frames', []))),
                 })
         
+        # Report export warnings
         if export_warnings and self.enable_warnings:
-            print(f"\n=== EXPORT WARNINGS ({len(export_warnings)}) ===")
-            for warning in export_warnings[:10]:
+            print("\n=== EXPORT WARNINGS ===")
+            for warning in export_warnings:
                 print(f"EXPORT WARNING: {warning}")
-            if len(export_warnings) > 10:
-                print(f"... and {len(export_warnings) - 10} more warnings")
-            print("=====================================\n")
+            print(f"Total export warnings: {len(export_warnings)}")
+            print("======================\n")
         
         df = pd.DataFrame(data)
         if not df.empty:
@@ -749,14 +997,15 @@ class TrackedParticleSimulator:
         if not df.empty and self.enable_warnings:
             detection_stats = df.groupby('particle').agg({
                 'duration': 'first',
-                'detected_duration': 'first'
+                'detected_duration': 'first',
+                'frame': 'count'
             }).reset_index()
             detection_stats['detection_rate'] = detection_stats['detected_duration'] / detection_stats['duration']
             
             print(f"\n=== DETECTION STATISTICS ===")
             print(f"Average detection rate: {detection_stats['detection_rate'].mean():.3f}")
             particles_with_gaps = detection_stats[detection_stats['detection_rate'] < 1.0]
-            print(f"Particles with gaps: {len(particles_with_gaps)}/{len(detection_stats)}")
+            print(f"Particles with detection gaps: {len(particles_with_gaps)}/{len(detection_stats)}")
             if len(particles_with_gaps) > 0:
                 print(f"Worst detection rate: {particles_with_gaps['detection_rate'].min():.3f}")
             print("===========================\n")
@@ -764,35 +1013,52 @@ class TrackedParticleSimulator:
         return df
     
     def print_summary(self):
+        """Print simulation summary including warnings and event mechanics examples"""
         print(f"\n=== SIMULATION SUMMARY ===")
         print(f"Total frames: {self.current_frame}")
         print(f"Total particles created: {self.next_id}")
         print(f"Total merges: {len(self.all_merges)}")
         print(f"Total splits: {len(self.all_splits)}")
-        print(f"Total warnings: {len(self.frame_warnings)}")
+        print(f"Total frame warnings: {len(self.frame_warnings)}")
         
-        # Event mechanics examples
+        # Show examples of each event type
         print(f"\n=== EVENT MECHANICS EXAMPLES ===")
         
+        # Normal merges
         normal_merges = [m for m in self.all_merges if not m['is_linking']]
         if normal_merges:
             example = normal_merges[0]
-            print(f"⚫ NORMAL MERGE (Frame {example['frame']}): {example['parent_ids']} → {example['child_id']}")
+            print(f"⚫ NORMAL MERGE Example (Frame {example['frame']}):")
+            print(f"   Parents {example['parent_ids']} → Child {example['child_id']}")
+            print(f"   Frame {example['frame']}: Parents get MERGE labels")
+            print(f"   Frame {example['frame']+1}: Child gets POST_MERGE label")
         
+        # Linking merges  
         linking_merges = [m for m in self.all_merges if m['is_linking']]
         if linking_merges:
             example = linking_merges[0]
-            print(f"🔗 LINKING MERGE (Frame {example['frame']}): {example['parent_ids']} → {example['child_id']}")
+            print(f"🔗 LINKING MERGE Example (Frame {example['frame']}):")
+            print(f"   Parents {example['parent_ids']} → Continuing {example['child_id']}")
+            print(f"   Frame {example['frame']}: Both particles get MERGE labels")
+            print(f"   Frame {example['frame']+1}: Continuing particle gets POST_MERGE label")
         
+        # Normal splits
         normal_splits = [s for s in self.all_splits if not s['is_linking']]
         if normal_splits:
             example = normal_splits[0]
-            print(f"⚫ NORMAL SPLIT (Frame {example['frame']}): {example['parent_id']} → {example['child_ids']}")
+            print(f"⚫ NORMAL SPLIT Example (Frame {example['frame']}):")
+            print(f"   Parent {example['parent_id']} → Children {example['child_ids']}")
+            print(f"   Frame {example['frame']}: Parent gets SPLIT label")
+            print(f"   Frame {example['frame']+1}: Children get POST_SPLIT labels")
         
+        # Linking splits
         linking_splits = [s for s in self.all_splits if s['is_linking']]
         if linking_splits:
             example = linking_splits[0]
-            print(f"🔗 LINKING SPLIT (Frame {example['frame']}): {example['parent_id']} → {example['child_ids']}")
+            print(f"🔗 LINKING SPLIT Example (Frame {example['frame']}):")
+            print(f"   Parent {example['parent_id']} → Continuing+New {example['child_ids']}")
+            print(f"   Frame {example['frame']}: Continuing particle gets SPLIT label")
+            print(f"   Frame {example['frame']+1}: BOTH particles get POST_SPLIT labels")
         
         if self.frame_warnings and self.enable_warnings:
             print(f"\nFirst 10 warnings:")
@@ -803,10 +1069,11 @@ class TrackedParticleSimulator:
         
         print("=========================\n")
 
+    
 def run_single_simulation(sim_id):
     np.random.seed(sim_id)
     
-    output_dir = 'data/tracked_simdata_dirty_80detec'
+    output_dir = 'data/tracked_simdata_clean'
     os.makedirs(output_dir, exist_ok=True)
     
     num_frames = 200
@@ -814,15 +1081,26 @@ def run_single_simulation(sim_id):
     num_initial = np.random.randint(initial_particles[0], initial_particles[1] + 1)
     
     sim = TrackedParticleSimulator(
-        x_range=(0, 100), y_range=(0, 100), z_range=(0, 50),  
-        min_mass=50000, max_mass=500000,
-        merge_distance_factor=5.0, split_mass_threshold=100000,
-        merge_prob=0.9, split_prob=0.01,
-        merge_linking_prob=0.90, split_linking_prob=0.90,
-        spontaneous_appear_prob=0.00, spontaneous_disappear_prob=0.00,
-        position_noise_sigma=0.5, mass_noise_cv=0.1,
-        reflective_boundaries=True, event_cooldown=5,
-        enable_warnings=False, detection_prob=0.80, max_undetectable_frames=4
+        x_range=(0, 100),
+        y_range=(0, 100),
+        z_range=(0, 50),  
+        min_mass=50000,
+        max_mass=500000,
+        merge_distance_factor=10.0,
+        split_mass_threshold=100000,
+        merge_prob=0.8,
+        split_prob=0.01,
+        merge_linking_prob=0.8,
+        split_linking_prob=0.8,
+        spontaneous_appear_prob=0.00,
+        spontaneous_disappear_prob=0.00,
+        position_noise_sigma=0.5,
+        mass_noise_cv=0.1,
+        reflective_boundaries=True,
+        event_cooldown=5,
+        enable_warnings=True,  # Enable warnings for debugging
+        detection_prob=0.90,    # 95% detection probability
+        max_undetectable_frames=3  # Max 3 consecutive undetectable frames
     )
     
     # Initialize particles
@@ -834,6 +1112,7 @@ def run_single_simulation(sim_id):
         mass = np.clip(mass, sim.min_mass, sim.max_mass)
         particle_id = sim.add_particle(x, y, z, mass)
         
+        # Record initial state
         particle = next(p for p in sim.particles if p['id'] == particle_id)
         sim.record_particle_state(particle, EventLabel.NORMAL)
     
@@ -845,7 +1124,8 @@ def run_single_simulation(sim_id):
     output_file = os.path.join(output_dir, f'tracked_particles_3d_{sim_id:05d}.csv')
     df = sim.export_to_csv(output_file)
     
-    if sim_id == 0:
+    # Print summary for single simulation
+    if sim_id == 0:  # Only print for first simulation to avoid spam
         sim.print_summary()
     
     return sim_id, len(df)
@@ -863,12 +1143,12 @@ def run_multiprocess_simulations(num_simulations=10000, num_cores=7):
     
     end_time = time.time()
     total_time = end_time - start_time
-    total_rows = sum(result[1] for result in results)
     
+    total_rows = sum(result[1] for result in results)
     print(f"\nAll 3D simulations completed!")
     print(f"Total time: {total_time:.2f} seconds")
     print(f"Average time per simulation: {total_time/num_simulations:.3f} seconds")
     print(f"Total data rows generated: {total_rows:,}")
 
 if __name__ == "__main__":
-    run_multiprocess_simulations(num_simulations=4000, num_cores=7)
+    run_multiprocess_simulations(num_simulations=1, num_cores=1)
