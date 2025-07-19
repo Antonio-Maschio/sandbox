@@ -133,7 +133,7 @@ def compute_class_weights(train_loader: DataLoader) -> torch.Tensor:
     class_weights = total_samples / (num_classes * class_counts.float())
     
     # Prevent any extreme weights due to very rare classes
-    class_weights = torch.clamp(class_weights, min=0.1, max=10.0)
+    class_weights = torch.clamp(class_weights, min=0.1, max=40.0)
     
     return class_weights
 
@@ -235,6 +235,13 @@ def train_model(
             optimizer.zero_grad()
             
             out = model(batch.x, batch.edge_index, batch.edge_attr)
+
+            # out = model(batch.x, batch.edge_index, batch.edge_attr, 
+            #        batch.edge_type, batch.batch,
+            #        batch.direct_temporal_mask,
+            #        batch.gap_temporal_mask, 
+            #        batch.proximity_mask)
+
             loss = criterion(out, batch.y)
             
             loss.backward()
