@@ -806,7 +806,7 @@ class TrackedParticleSimulator:
 def run_single_simulation(sim_id):
     np.random.seed(sim_id)
     
-    output_dir = 'data/tracked_simdata_dirty_80detec'
+    output_dir = 'data/tracked_simdata_dirty_90detec'
     os.makedirs(output_dir, exist_ok=True)
     
     num_frames = 200
@@ -822,7 +822,7 @@ def run_single_simulation(sim_id):
         spontaneous_appear_prob=0.00, spontaneous_disappear_prob=0.00,
         position_noise_sigma=0.5, mass_noise_cv=0.1,
         reflective_boundaries=True, event_cooldown=5,
-        enable_warnings=False, detection_prob=0.80, max_undetectable_frames=4
+        enable_warnings=False, detection_prob=0.90, max_undetectable_frames=4
     )
     
     # Initialize particles
@@ -871,4 +871,4 @@ def run_multiprocess_simulations(num_simulations=10000, num_cores=7):
     print(f"Total data rows generated: {total_rows:,}")
 
 if __name__ == "__main__":
-    run_multiprocess_simulations(num_simulations=4000, num_cores=7)
+    run_multiprocess_simulations(num_simulations=1000, num_cores=7)

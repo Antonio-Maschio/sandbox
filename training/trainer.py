@@ -4,6 +4,7 @@ from typing import Dict, List, Optional, Tuple, Union, Any
 import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
 from torch_geometric.data import Batch
+from training.compute_class_wheights import *
 
 
 def validate_model(
@@ -83,60 +84,6 @@ def validate_model(
     return val_loss, val_acc, class_acc
 
 
-def compute_class_weights(train_loader: DataLoader) -> torch.Tensor:
-    """
-    Compute class weights inversely proportional to class frequency.
-    
-    Addresses class imbalance by providing higher weights to under-represented 
-    classes and lower weights to over-represented classes. Supports the 5-class
-    particle event classification system.
-    
-    Args:
-        train_loader (DataLoader): DataLoader containing training dataset
-            with labeled event classes:
-            - 0: non-event
-            - 1: merge
-            - 2: split
-            - 3: post merge
-            - 4: post split
-    
-    Returns:
-        torch.Tensor: Class weights tensor with shape [num_classes], where:
-            - Index 0: Weight for non-event class
-            - Index 1: Weight for merge event class 
-            - Index 2: Weight for split event class
-            - Index 3: Weight for post merge event class
-            - Index 4: Weight for post split event class
-    
-    Note:
-        The weights are computed using the formula:
-        weight(c) = total_samples / (num_classes * count(c))
-    
-    Example:
-        >>> class_weights = compute_class_weights(train_loader)
-        >>> print(f"Class weights: {class_weights}")
-        >>> criterion = torch.nn.NLLLoss(weight=class_weights)
-    """
-    y_train = torch.cat([data.y for data in train_loader.dataset])
-    class_counts = torch.bincount(y_train)
-    
-    # Handle potential edge case if some classes are missing in the training set
-    if len(class_counts) < 5:  # Ensure we have weights for all 5 classes
-        padded_counts = torch.zeros(5, dtype=torch.float)
-        padded_counts[:len(class_counts)] = class_counts
-        class_counts = padded_counts
-    
-    total_samples = len(y_train)
-    num_classes = 5  # Updated for 5-class system
-    
-    # Compute inverse frequency weights
-    class_weights = total_samples / (num_classes * class_counts.float())
-    
-    # Prevent any extreme weights due to very rare classes
-    class_weights = torch.clamp(class_weights, min=0.1, max=40.0)
-    
-    return class_weights
-
 
 def train_model(
     model: torch.nn.Module, 
@@ -207,7 +154,7 @@ def train_model(
     )
 
     # Compute class weights to handle class imbalance
-    class_weights = compute_class_weights(train_loader)
+    class_weights = compute_class_weights_harsh(train_loader)
     class_weights = class_weights.to(device)
     criterion = torch.nn.NLLLoss(weight=class_weights)  # Weighted loss
     

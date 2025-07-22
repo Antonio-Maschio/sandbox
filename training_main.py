@@ -9,7 +9,7 @@ from typing import Optional
 
 # from data_processing.data_2step import load_processed_data
 from processing_data.preprocessor import load_preprocessed_data
-
+from training.trainer_focal import train_model_focal
 
 from models.gnn import ParticleGNNBiggerWithResidual
 from models.gnn_A5000 import *
@@ -111,7 +111,7 @@ def main(config: Optional[TrainingConfig] = None):
     print(f"\nStarting training for {config.epochs} epochs...")
     start_time = time.time()
     
-    trained_model, history = train_model(
+    trained_model, history = train_model_focal(
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
@@ -177,7 +177,7 @@ if __name__ == "__main__":
         batch_size=8,
         epochs=500,#500
         learning_rate=0.005,
-        model_save_path="saved_models/detectio90_w40.pt"
+        model_save_path="saved_models/detectio90_w40_newweighfocal.pt"
     )
     
     model, history = main(custom_config)
